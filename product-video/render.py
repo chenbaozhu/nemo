@@ -38,10 +38,11 @@ INK = (29, 29, 31)
 GREY = (110, 110, 115)
 WHITE = (245, 245, 247)
 
-# Product source geometry (pixels in sunglasses.jpg, 640x320)
-SRC_BG = 245.0          # studio background level of the source photo
-UP = 4                  # master upscale factor
-FULL_CENTER = (311.0, 160.0)
+# Product source geometry (pixels in sunglasses.png, 1672x941)
+SRC_BG = 254.0          # studio background level of the source photo
+UP = 1                  # master upscale factor (source is already high-res)
+FULL_CENTER = (817.0, 448.0)
+SHADOW = dict(offset=70, blur=34, squash=0.35, opacity=0.11)
 
 
 # ---- easing ----------------------------------------------------------------
@@ -69,18 +70,31 @@ def lerp(a, b, x):
 def load_product():
     """Return (transmittance, body mask) masters upscaled UP times.
 
-    The photo is a dark object on a ~245 grey sweep, so dividing by the
+    The photo is a dark object on a white sweep, so dividing by the
     background level gives a multiply layer: background -> 1.0 (transparent),
-    product and its soft shadow -> < 1.0. Re-lighting it on any light backdrop
-    keeps the real contact shadow.
+    product -> < 1.0, and it can be re-lit on any light backdrop. The studio
+    shot has almost no shadow, so a soft ground shadow is synthesised from the
+    product silhouette to keep it from floating.
     """
-    src = Image.open(os.path.join(ASSETS, "sunglasses.jpg")).convert("RGB")
-    big = src.resize((src.width * UP, src.height * UP), Image.LANCZOS)
-    big = big.filter(ImageFilter.UnsharpMask(radius=3, percent=90, threshold=2))
+    big = Image.open(os.path.join(ASSETS, "sunglasses.png")).convert("RGB")
+    if UP != 1:
+        big = big.resize((big.width * UP, big.height * UP), Image.LANCZOS)
     arr = np.asarray(big).astype(np.float32)
     trans = np.clip(arr / SRC_BG, 0, 1)
     lum = arr.mean(axis=2)
-    body = np.clip((150.0 - lum) / 90.0, 0, 1)  # lens + frame, not the shadow
+    body = np.clip((150.0 - lum) / 90.0, 0, 1)  # lens + frame
+
+    # Ground shadow: silhouette squashed toward its lower edge, pushed down, blurred.
+    sil = Image.fromarray((body * 255).astype(np.uint8), "L")
+    ys = np.nonzero(body.max(axis=1) > 0.5)[0]
+    base = int(ys.max())
+    sh_h = max(1, int(sil.height * SHADOW["squash"]))
+    squashed = sil.resize((sil.width, sh_h), Image.BILINEAR)
+    canvas = Image.new("L", sil.size, 0)
+    canvas.paste(squashed, (0, base - int((base / sil.height) * sh_h) + SHADOW["offset"] * UP))
+    canvas = canvas.filter(ImageFilter.GaussianBlur(SHADOW["blur"] * UP))
+    shadow = np.asarray(canvas).astype(np.float32) / 255.0
+    trans = trans * (1 - SHADOW["opacity"] * shadow)[..., None]
     trans_img = Image.fromarray((trans * 255).astype(np.uint8), "RGB")
     body_img = Image.fromarray((body * 255).astype(np.uint8), "L")
     body_img = body_img.filter(ImageFilter.GaussianBlur(1.5))
@@ -105,19 +119,19 @@ def camera(t):
     """(cx, cy, zoom, rotation_deg, screen_dy) at time t."""
     # Shot A: macro drift across the right lens.
     a = ease_io(prog(t, 1.6, 4.6))
-    cx, cy = lerp(305, 268, a), lerp(178, 168, a)
-    z, rot = lerp(4.6, 4.1, a), lerp(-4.0, -1.5, a)
+    cx, cy = lerp(800, 700, a), lerp(500, 470, a)
+    z, rot = lerp(2.1, 1.8, a), lerp(-4.0, -1.5, a)
     # Shot B: one continuous dolly out to the hero framing.
     b = ease_io(prog(t, 4.2, 6.8))
     cx, cy = lerp(cx, FULL_CENTER[0], b), lerp(cy, FULL_CENTER[1], b)
-    z, rot = lerp(z, 2.3, b), lerp(rot, 0.0, b)
+    z, rot = lerp(z, 0.88, b), lerp(rot, 0.0, b)
     # Shot C: hero breathe.
     c = prog(t, 6.8, 8.0)
     z *= 1 + 0.025 * ease_io(c)
     dy = 6 * math.sin(max(0.0, t - 6.8) * 1.6) * (1 - prog(t, 7.9, 8.4))
     # Shot D: lift product to make room for the end card.
     d = ease_out(prog(t, 7.9, 9.0))
-    z = lerp(z, 1.8, d)
+    z = lerp(z, 0.69, d)
     dy = lerp(dy, -150, d)
     return cx, cy, z, rot, dy
 
